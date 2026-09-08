@@ -54,24 +54,33 @@ API em Python (FastAPI) para mineração e análise comparativa de Pull Requests
 
 Acesse `http://localhost:8000/docs` para a documentação interativa (Swagger UI).
 
-## Fluxo de uso recomendado
+## Como Usar
 
-### 1. Extrair os PRs
-```
-GET /prs/{owner}/{repo}?limit=50&state=all
-```
-Exemplo: `GET /prs/facebook/react?limit=50`
+Você pode chamar **qualquer endpoint diretamente** (a API faz a extração necessária automaticamente):
 
-Retorna a lista de PRs com classificação `newcomer` ou `veteran` já aplicada.
+### 1. Extração completa e Relatório em 1 clique (Recomendado)
+```
+GET /metrics/{owner}/{repo}
+```
+Exemplo: `GET /metrics/fastapi/fastapi` ou `GET /metrics/EbookFoundation/free-programming-books`
+
+A API extrai os PRs, coleta e categoriza os comentários, e devolve o relatório comparativo completo (newcomers vs. veteranos).
 
 ---
 
-### 2. Coletar comentários de review
+### 2. Extração individual de PRs
+```
+GET /prs/{owner}/{repo}?limit=50&state=all
+```
+Retorna a lista de PRs classificados como `newcomer` ou `veteran`.
+
+---
+
+### 3. Extração e Categorização de comentários
 ```
 GET /prs/{owner}/{repo}/comments?auto_categorize=true
 ```
-
-Com `auto_categorize=true`, os comentários já são categorizados automaticamente por palavras-chave.
+Coleta todos os comentários dos PRs e os classifica por palavras-chave.
 
 ---
 
@@ -110,6 +119,9 @@ O sistema consulta a API do GitHub para contar o total histórico de PRs do auto
 
 ## Notas
 
-- Os dados ficam em cache em memória por sessão. Reiniciar o servidor limpa o cache.
+- Os dados são salvos em disco na pasta `.cache/` com TTL de **24 horas**. Reiniciar o servidor **não perde os dados** — eles são recarregados automaticamente enquanto não expirarem.
+- Para forçar nova extração sem esperar o TTL, use `?forcar_atualizacao=true` nos endpoints de PRs e comentários.
+- Para consultar quando o cache expira: `GET /prs/{owner}/{repo}/cache/info`
+- Para limpar manualmente: `DELETE /prs/{owner}/{repo}/cache`
 - Sem token, a API do GitHub limita a 60 req/hora. Com token, o limite é 5000 req/hora.
 - Para uma amostra de 30–50 PRs (trabalho de disciplina), o limite sem token pode ser suficiente se o repositório não for muito movimentado.

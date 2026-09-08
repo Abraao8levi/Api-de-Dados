@@ -16,7 +16,7 @@ def _hours_between(start: datetime, end: datetime) -> float:
         start = start.replace(tzinfo=timezone.utc)
     if end.tzinfo is None:
         end = end.replace(tzinfo=timezone.utc)
-    return (end - start).total_seconds() / 3600
+    return round((end - start).total_seconds() / 3600, 2)
 
 
 def _determine_status(raw_pr: dict) -> PRStatus:
@@ -27,30 +27,25 @@ def _determine_status(raw_pr: dict) -> PRStatus:
     return PRStatus.open
 
 
+def _classify_contributor(raw_pr: dict) -> ContributorType:
+    assoc = (raw_pr.get("author_association") or "").upper()
+    if assoc in ("FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "NONE", ""):
+        return ContributorType.newcomer
+    return ContributorType.veteran
+
+
 class PRExtractor:
     def __init__(self, client: GitHubClient, owner: str, repo: str):
         self.client = client
-        self.owner = owner
-        self.repo = repo
-        self._contributor_pr_cache: dict[str, int] = {}
+        self.owner = owner.strip().rstrip("/")
+        self.repo = repo.strip().rstrip("/")
 
-    async def _count_previous_prs(self, username: str, current_pr_number: int) -> int:
-        if username in self._contributor_pr_cache:
-            return self._contributor_pr_cache[username]
-
-        count = await self.client.get_contributor_pr_count(self.owner, self.repo, username)
-        self._contributor_pr_cache[username] = count
-        return count
-
-    def _classify_contributor(self, pr_count_before: int) -> ContributorType:
-        return ContributorType.newcomer if pr_count_before <= 1 else ContributorType.veteran
-
-    async def _build_pr(self, raw_pr: dict) -> PullRequest:
-        author = raw_pr["user"]["login"]
+    def _build_pr(self, raw_pr: dict) -> PullRequest:
+        user_info = raw_pr.get("user")
+        author = user_info["login"] if user_info else "ghost"
         pr_number = raw_pr["number"]
 
-        total_prs = await self._count_previous_prs(author, pr_number)
-        contributor_type = self._classify_contributor(total_prs)
+        contributor_type = _classify_contributor(raw_pr)
 
         created_at = _parse_dt(raw_pr["created_at"])
         closed_at = _parse_dt(raw_pr.get("closed_at"))
@@ -70,7 +65,7 @@ class PRExtractor:
 
         return PullRequest(
             number=pr_number,
-            title=raw_pr["title"],
+            title=raw_pr.get("title", "") or "",
             author=author,
             contributor_type=contributor_type,
             status=status,
@@ -85,7 +80,7 @@ class PRExtractor:
         )
 
     async def fetch_prs(self, limit: int = 50, state: str = "all") -> list[PullRequest]:
-        pages_needed = max(1, (limit // 100) + 1)
+        pages_needed = max(1, (limit // 100) + (1 if limit % 100 != 0 else 0))
         raw_prs = await self.client.get_all_pages(
             f"/repos/{self.owner}/{self.repo}/pulls",
             params={"state": state, "sort": "created", "direction": "desc"},
@@ -93,33 +88,66 @@ class PRExtractor:
         )
 
         raw_prs = raw_prs[:limit]
+        return [self._build_pr(pr) for pr in raw_prs]
 
-        tasks = [self._build_pr(pr) for pr in raw_prs]
-        prs = await asyncio.gather(*tasks)
-        return list(prs)
-
-    async def fetch_review_comments(self, pr_number: int) -> list[ReviewComment]:
-        raw_comments = await self.client.get_all_pages(
-            f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}/comments",
-            max_pages=2,
-        )
+    async def fetch_review_comments(self, pr: PullRequest) -> list[ReviewComment]:
+        if pr.review_comments_count == 0 and pr.issue_comments_count == 0:
+            return []
 
         comments = []
-        for c in raw_comments:
-            comments.append(
-                ReviewComment(
-                    id=c["id"],
-                    pr_number=pr_number,
-                    author=c["user"]["login"],
-                    body=c["body"],
-                    created_at=_parse_dt(c["created_at"]),
+
+        try:
+            if pr.review_comments_count > 0:
+                raw_rc = await self.client.get_all_pages(
+                    f"/repos/{self.owner}/{self.repo}/pulls/{pr.number}/comments",
+                    max_pages=2,
                 )
-            )
+                for c in raw_rc:
+                    user_info = c.get("user")
+                    author = user_info["login"] if user_info else "ghost"
+                    comments.append(
+                        ReviewComment(
+                            id=c["id"],
+                            pr_number=pr.number,
+                            author=author,
+                            body=c.get("body", "") or "",
+                            created_at=_parse_dt(c["created_at"]),
+                        )
+                    )
+
+            if pr.issue_comments_count > 0:
+                raw_ic = await self.client.get_all_pages(
+                    f"/repos/{self.owner}/{self.repo}/issues/{pr.number}/comments",
+                    max_pages=2,
+                )
+                for c in raw_ic:
+                    user_info = c.get("user")
+                    author = user_info["login"] if user_info else "ghost"
+                    comments.append(
+                        ReviewComment(
+                            id=c["id"],
+                            pr_number=pr.number,
+                            author=author,
+                            body=c.get("body", "") or "",
+                            created_at=_parse_dt(c["created_at"]),
+                        )
+                    )
+        except Exception:
+            pass
+
         return comments
 
     async def fetch_all_review_comments(self, prs: list[PullRequest]) -> list[ReviewComment]:
+        sem = asyncio.Semaphore(10)
+
+        async def _fetch_with_sem(pr: PullRequest):
+            async with sem:
+                return await self.fetch_review_comments(pr)
+
+        tasks = [_fetch_with_sem(pr) for pr in prs]
+        results = await asyncio.gather(*tasks)
+
         all_comments = []
-        for pr in prs:
-            comments = await self.fetch_review_comments(pr.number)
-            all_comments.extend(comments)
+        for comments_list in results:
+            all_comments.extend(comments_list)
         return all_comments
