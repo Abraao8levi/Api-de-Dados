@@ -24,13 +24,20 @@ def _compute_metrics(prs: list[PullRequest], comments: list[ReviewComment], cont
     closed_no_merge = [pr for pr in filtered if pr.status == PRStatus.closed]
     open_prs = [pr for pr in filtered if pr.status == PRStatus.open]
 
-    acceptance_rate = len(merged) / total if total else 0.0
+    resolved_count = len(merged) + len(closed_no_merge)
+    acceptance_rate = (len(merged) / resolved_count) if resolved_count > 0 else 0.0
 
     total_comments = sum(pr.total_comments for pr in filtered)
-    avg_comments = total_comments / total if total else 0.0
+    avg_comments = total_comments / total if total > 0 else 0.0
 
-    close_times = [pr.hours_to_close for pr in filtered if pr.hours_to_close is not None]
-    merge_times = [pr.hours_to_merge for pr in filtered if pr.hours_to_merge is not None]
+    close_times = [
+        pr.hours_to_close for pr in filtered
+        if pr.status == PRStatus.closed and pr.hours_to_close is not None
+    ]
+    merge_times = [
+        pr.hours_to_merge for pr in filtered
+        if pr.status == PRStatus.merged and pr.hours_to_merge is not None
+    ]
 
     avg_close = sum(close_times) / len(close_times) if close_times else None
     avg_merge = sum(merge_times) / len(merge_times) if merge_times else None

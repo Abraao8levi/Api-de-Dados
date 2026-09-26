@@ -1,14 +1,24 @@
 import asyncio
+import logging
 from datetime import datetime, timezone
 from dateutil import parser as date_parser
+import httpx
 from github_client import GitHubClient
 from models import PullRequest, ReviewComment, ContributorType, PRStatus
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_dt(value: str | None) -> datetime | None:
     if not value:
         return None
-    return date_parser.parse(value)
+    try:
+        dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        dt = date_parser.parse(value)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
 
 
 def _hours_between(start: datetime, end: datetime) -> float:
@@ -16,7 +26,8 @@ def _hours_between(start: datetime, end: datetime) -> float:
         start = start.replace(tzinfo=timezone.utc)
     if end.tzinfo is None:
         end = end.replace(tzinfo=timezone.utc)
-    return round((end - start).total_seconds() / 3600, 2)
+    diff = (end - start).total_seconds() / 3600
+    return round(max(0.0, diff), 2)
 
 
 def _determine_status(raw_pr: dict) -> PRStatus:
@@ -42,7 +53,7 @@ class PRExtractor:
 
     def _build_pr(self, raw_pr: dict) -> PullRequest:
         user_info = raw_pr.get("user")
-        author = user_info["login"] if user_info else "ghost"
+        author = user_info.get("login", "ghost") if isinstance(user_info, dict) else "ghost"
         pr_number = raw_pr["number"]
 
         contributor_type = _classify_contributor(raw_pr)
@@ -55,13 +66,13 @@ class PRExtractor:
         hours_to_close = None
         hours_to_merge = None
 
-        if closed_at and created_at:
+        if closed_at and created_at and status == PRStatus.closed:
             hours_to_close = _hours_between(created_at, closed_at)
         if merged_at and created_at:
             hours_to_merge = _hours_between(created_at, merged_at)
 
-        review_comments = raw_pr.get("review_comments", 0)
-        issue_comments = raw_pr.get("comments", 0)
+        review_comments = max(0, raw_pr.get("review_comments", 0))
+        issue_comments = max(0, raw_pr.get("comments", 0))
 
         return PullRequest(
             number=pr_number,
@@ -79,32 +90,55 @@ class PRExtractor:
             hours_to_merge=hours_to_merge,
         )
 
+    async def _fetch_pr_detail(self, pr_number: int) -> dict:
+        return await self.client.get(
+            f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}"
+        )
+
     async def fetch_prs(self, limit: int = 50, state: str = "all") -> list[PullRequest]:
-        pages_needed = max(1, (limit // 100) + (1 if limit % 100 != 0 else 0))
+        per_page = min(limit, 100)
+        pages_needed = max(1, (limit // per_page) + (1 if limit % per_page != 0 else 0))
         raw_prs = await self.client.get_all_pages(
             f"/repos/{self.owner}/{self.repo}/pulls",
-            params={"state": state, "sort": "created", "direction": "desc"},
+            params={"state": state, "sort": "created", "direction": "desc", "per_page": per_page},
             max_pages=pages_needed,
         )
 
         raw_prs = raw_prs[:limit]
-        return [self._build_pr(pr) for pr in raw_prs]
+        sem = asyncio.Semaphore(10)
+
+        async def _detail_with_sem(raw: dict) -> dict:
+            async with sem:
+                try:
+                    return await self._fetch_pr_detail(raw["number"])
+                except Exception as exc:
+                    logger.warning("Falha ao obter detalhes do PR#%s: %s", raw["number"], exc)
+                    return raw
+
+        tasks = [_detail_with_sem(r) for r in raw_prs]
+        detailed_prs = await asyncio.gather(*tasks)
+
+        return [self._build_pr(pr) for pr in detailed_prs]
 
     async def fetch_review_comments(self, pr: PullRequest) -> list[ReviewComment]:
-        if pr.review_comments_count == 0 and pr.issue_comments_count == 0:
+        if pr.total_comments == 0 and pr.review_comments_count == 0 and pr.issue_comments_count == 0:
             return []
 
-        comments = []
+        comments: list[ReviewComment] = []
 
         try:
-            if pr.review_comments_count > 0:
+            if pr.review_comments_count > 0 or pr.total_comments == 0:
                 raw_rc = await self.client.get_all_pages(
                     f"/repos/{self.owner}/{self.repo}/pulls/{pr.number}/comments",
-                    max_pages=2,
+                    max_pages=3,
                 )
                 for c in raw_rc:
-                    user_info = c.get("user")
-                    author = user_info["login"] if user_info else "ghost"
+                    user_info = c.get("user") or {}
+                    author = user_info.get("login", "ghost")
+                    is_bot = user_info.get("type") == "Bot" or author.lower().endswith("[bot]")
+                    if is_bot:
+                        continue
+
                     comments.append(
                         ReviewComment(
                             id=c["id"],
@@ -112,17 +146,22 @@ class PRExtractor:
                             author=author,
                             body=c.get("body", "") or "",
                             created_at=_parse_dt(c["created_at"]),
+                            tipo="review",
                         )
                     )
 
-            if pr.issue_comments_count > 0:
+            if pr.issue_comments_count > 0 or pr.total_comments == 0:
                 raw_ic = await self.client.get_all_pages(
                     f"/repos/{self.owner}/{self.repo}/issues/{pr.number}/comments",
-                    max_pages=2,
+                    max_pages=3,
                 )
                 for c in raw_ic:
-                    user_info = c.get("user")
-                    author = user_info["login"] if user_info else "ghost"
+                    user_info = c.get("user") or {}
+                    author = user_info.get("login", "ghost")
+                    is_bot = user_info.get("type") == "Bot" or author.lower().endswith("[bot]")
+                    if is_bot:
+                        continue
+
                     comments.append(
                         ReviewComment(
                             id=c["id"],
@@ -130,15 +169,21 @@ class PRExtractor:
                             author=author,
                             body=c.get("body", "") or "",
                             created_at=_parse_dt(c["created_at"]),
+                            tipo="issue",
                         )
                     )
-        except Exception:
-            pass
+
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 403, 429):
+                raise
+            logger.warning("Erro HTTP ao extrair comentários do PR#%s: %s", pr.number, exc)
+        except Exception as exc:
+            logger.warning("Erro inesperado ao extrair comentários do PR#%s: %s", pr.number, exc)
 
         return comments
 
     async def fetch_all_review_comments(self, prs: list[PullRequest]) -> list[ReviewComment]:
-        sem = asyncio.Semaphore(10)
+        sem = asyncio.Semaphore(5)
 
         async def _fetch_with_sem(pr: PullRequest):
             async with sem:

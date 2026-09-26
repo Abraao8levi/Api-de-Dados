@@ -1,7 +1,7 @@
 from enum import Enum
-from typing import Optional
+from typing import Optional, Literal
 from datetime import datetime
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class ContributorType(str, Enum):
@@ -29,6 +29,7 @@ class ReviewComment(BaseModel):
     author: str
     body: str
     created_at: datetime
+    tipo: Literal["review", "issue"] = "issue"
     category: Optional[CommentCategory] = None
 
 
@@ -41,9 +42,9 @@ class PullRequest(BaseModel):
     created_at: datetime
     closed_at: Optional[datetime] = None
     merged_at: Optional[datetime] = None
-    review_comments_count: int
-    issue_comments_count: int
-    total_comments: int
+    review_comments_count: int = 0
+    issue_comments_count: int = 0
+    total_comments: int = 0
     hours_to_close: Optional[float] = None
     hours_to_merge: Optional[float] = None
 
@@ -56,9 +57,9 @@ class PRMetrics(BaseModel):
     open_prs: int
     acceptance_rate: float
     avg_comments_per_pr: float
-    avg_hours_to_close: Optional[float]
-    avg_hours_to_merge: Optional[float]
-    comment_categories: dict
+    avg_hours_to_close: Optional[float] = None
+    avg_hours_to_merge: Optional[float] = None
+    comment_categories: dict[str, int] = Field(default_factory=dict)
 
 
 class ComparativeReport(BaseModel):
@@ -67,9 +68,10 @@ class ComparativeReport(BaseModel):
     newcomers: PRMetrics
     veterans: PRMetrics
     total_review_comments: int
-    comment_category_distribution: dict
+    comment_category_distribution: dict[str, int] = Field(default_factory=dict)
 
 
 class CategorizationRequest(BaseModel):
     comment_id: int
     category: CommentCategory
+    tipo: Optional[Literal["review", "issue"]] = None

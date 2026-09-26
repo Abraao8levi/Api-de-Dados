@@ -5,7 +5,7 @@ from config import settings
 
 class GitHubClient:
     def __init__(self):
-        self.base_url = settings.github_api_url
+        self.base_url = settings.github_api_url.rstrip("/")
         headers = {
             "Accept": "application/vnd.github+json",
             "X-GitHub-Api-Version": "2022-11-28",
@@ -20,7 +20,7 @@ class GitHubClient:
             self._client = httpx.AsyncClient(timeout=30, headers=self.headers)
         return self._client
 
-    async def get(self, path: str, params: dict = None) -> Any:
+    async def get(self, path: str, params: dict | None = None) -> Any:
         client = self._get_client()
         response = await client.get(
             f"{self.base_url}{path}",
@@ -29,10 +29,10 @@ class GitHubClient:
         response.raise_for_status()
         return response.json()
 
-    async def get_all_pages(self, path: str, params: dict = None, max_pages: int = 5) -> list:
+    async def get_all_pages(self, path: str, params: dict | None = None, max_pages: int = 5) -> list:
         results = []
         page = 1
-        base_params = params or {}
+        base_params = dict(params or {})
         per_page = base_params.get("per_page", 100)
         client = self._get_client()
 
