@@ -11,7 +11,7 @@ router = APIRouter(prefix="/metrics", tags=["Métricas"])
 
 
 @router.get(
-    "/{owner}/{repo}",
+    "/{owner}/{repo:path}",
     response_model=ComparativeReport,
     summary="4. Relatório comparativo: Newcomers vs. Veteranos",
     description="Calcula e retorna métricas comparativas entre novatos e veteranos.",
