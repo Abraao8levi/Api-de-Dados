@@ -38,6 +38,10 @@ def _cache_comments_key(owner: str, repo: str) -> str:
     return f"{owner}__{repo}__comments"
 
 
+def _cache_reviews_key(owner: str, repo: str) -> str:
+    return f"{owner}__{repo}__reviews"
+
+
 async def _extrair_prs_interno(
     owner: str,
     repo: str,
@@ -204,6 +208,7 @@ async def limpar_cache(
         for limit in (10, 20, 30, 50, 100):
             cache.invalidar(_cache_prs_key(clean_owner, clean_repo, state, limit))
     cache.invalidar(_cache_comments_key(clean_owner, clean_repo))
+    cache.invalidar(_cache_reviews_key(clean_owner, clean_repo))
     return {"detail": f"Cache de {clean_owner}/{clean_repo} removido com sucesso."}
 
 

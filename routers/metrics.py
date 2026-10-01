@@ -1,10 +1,11 @@
 from fastapi import APIRouter, Path, Query
-from routers.prs import _clean_repo_params, _extrair_prs_interno, _cache_comments_key
+from routers.prs import _clean_repo_params, _extrair_prs_interno, _cache_comments_key, _cache_reviews_key
 from services.classifier import apply_auto_categorization
 from services.extractor import PRExtractor
 from services.metrics import build_comparative_report
+from services.docs import fetch_repo_docs
 from github_client import github_client
-from models import ComparativeReport, ReviewComment
+from models import ComparativeReport, ReviewComment, Review
 import cache
 
 router = APIRouter(prefix="/metrics", tags=["Métricas"])
@@ -25,18 +26,29 @@ async def relatorio_comparativo(
 ):
     clean_owner, clean_repo = _clean_repo_params(owner, repo)
     key_comments = _cache_comments_key(clean_owner, clean_repo)
+    key_reviews = _cache_reviews_key(clean_owner, clean_repo)
 
     prs = await _extrair_prs_interno(
         clean_owner, clean_repo, limit=limit, state=state, forcar=forcar_atualizacao
     )
 
+    extractor = PRExtractor(github_client, clean_owner, clean_repo)
+
     comments_raw = cache.carregar(key_comments)
     if not comments_raw or forcar_atualizacao:
-        extractor = PRExtractor(github_client, clean_owner, clean_repo)
         comments = await extractor.fetch_all_review_comments(prs)
         comments = apply_auto_categorization(comments)
         cache.salvar(key_comments, [c.model_dump(mode="json") for c in comments])
     else:
         comments = [ReviewComment(**c) if isinstance(c, dict) else c for c in comments_raw]
 
-    return build_comparative_report(clean_owner, clean_repo, prs, comments)
+    reviews_raw = cache.carregar(key_reviews)
+    if not reviews_raw or forcar_atualizacao:
+        reviews = await extractor.fetch_all_reviews(prs)
+        cache.salvar(key_reviews, [r.model_dump(mode="json") for r in reviews])
+    else:
+        reviews = [Review(**r) if isinstance(r, dict) else r for r in reviews_raw]
+
+    documentation = await fetch_repo_docs(github_client, clean_owner, clean_repo)
+
+    return build_comparative_report(clean_owner, clean_repo, prs, comments, reviews, documentation)
