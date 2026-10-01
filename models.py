@@ -23,6 +23,13 @@ class PRStatus(str, Enum):
     merged = "merged"
 
 
+class ReviewState(str, Enum):
+    approved = "APPROVED"
+    changes_requested = "CHANGES_REQUESTED"
+    commented = "COMMENTED"
+    dismissed = "DISMISSED"
+
+
 class ReviewComment(BaseModel):
     id: int
     pr_number: int
@@ -31,6 +38,15 @@ class ReviewComment(BaseModel):
     created_at: datetime
     tipo: Literal["review", "issue"] = "issue"
     category: Optional[CommentCategory] = None
+    has_suggestion: bool = False
+
+
+class Review(BaseModel):
+    id: int
+    pr_number: int
+    author: str
+    state: ReviewState
+    submitted_at: Optional[datetime] = None
 
 
 class PullRequest(BaseModel):
@@ -47,6 +63,14 @@ class PullRequest(BaseModel):
     total_comments: int = 0
     hours_to_close: Optional[float] = None
     hours_to_merge: Optional[float] = None
+    pr_count_in_sample: int = 1
+
+
+class RepoDocumentation(BaseModel):
+    has_contributing: bool = False
+    has_pr_template: bool = False
+    contributing_url: Optional[str] = None
+    pr_template_url: Optional[str] = None
 
 
 class PRMetrics(BaseModel):
@@ -59,6 +83,10 @@ class PRMetrics(BaseModel):
     avg_comments_per_pr: float
     avg_hours_to_close: Optional[float] = None
     avg_hours_to_merge: Optional[float] = None
+    avg_hours_to_first_review: Optional[float] = None
+    avg_review_rounds: float = 0.0
+    prs_with_changes_requested_pct: float = 0.0
+    prs_with_suggestions_pct: float = 0.0
     comment_categories: dict[str, int] = Field(default_factory=dict)
 
 
@@ -69,6 +97,7 @@ class ComparativeReport(BaseModel):
     veterans: PRMetrics
     total_review_comments: int
     comment_category_distribution: dict[str, int] = Field(default_factory=dict)
+    documentation: RepoDocumentation = Field(default_factory=RepoDocumentation)
 
 
 class CategorizationRequest(BaseModel):
