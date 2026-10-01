@@ -1,10 +1,11 @@
 import asyncio
 import logging
+from collections import Counter
 from datetime import datetime, timezone
 from dateutil import parser as date_parser
 import httpx
 from github_client import GitHubClient
-from models import PullRequest, ReviewComment, ContributorType, PRStatus
+from models import PullRequest, ReviewComment, Review, ReviewState, ContributorType, PRStatus
 
 logger = logging.getLogger(__name__)
 
@@ -43,6 +44,14 @@ def _classify_contributor(raw_pr: dict) -> ContributorType:
     if assoc in ("FIRST_TIME_CONTRIBUTOR", "FIRST_TIMER", "NONE", ""):
         return ContributorType.newcomer
     return ContributorType.veteran
+
+
+def apply_historical_classification(prs: list[PullRequest]) -> list[PullRequest]:
+    count = Counter(pr.author for pr in prs)
+    for pr in prs:
+        pr.pr_count_in_sample = count[pr.author]
+        pr.contributor_type = ContributorType.veteran if count[pr.author] >= 3 else ContributorType.newcomer
+    return prs
 
 
 class PRExtractor:
@@ -118,7 +127,8 @@ class PRExtractor:
         tasks = [_detail_with_sem(r) for r in raw_prs]
         detailed_prs = await asyncio.gather(*tasks)
 
-        return [self._build_pr(pr) for pr in detailed_prs]
+        prs = [self._build_pr(pr) for pr in detailed_prs]
+        return apply_historical_classification(prs)
 
     async def fetch_review_comments(self, pr: PullRequest) -> list[ReviewComment]:
         if pr.total_comments == 0 and pr.review_comments_count == 0 and pr.issue_comments_count == 0:
@@ -139,14 +149,16 @@ class PRExtractor:
                     if is_bot:
                         continue
 
+                    body = c.get("body", "") or ""
                     comments.append(
                         ReviewComment(
                             id=c["id"],
                             pr_number=pr.number,
                             author=author,
-                            body=c.get("body", "") or "",
+                            body=body,
                             created_at=_parse_dt(c["created_at"]),
                             tipo="review",
+                            has_suggestion="```suggestion" in body,
                         )
                     )
 
@@ -162,14 +174,16 @@ class PRExtractor:
                     if is_bot:
                         continue
 
+                    body = c.get("body", "") or ""
                     comments.append(
                         ReviewComment(
                             id=c["id"],
                             pr_number=pr.number,
                             author=author,
-                            body=c.get("body", "") or "",
+                            body=body,
                             created_at=_parse_dt(c["created_at"]),
                             tipo="issue",
+                            has_suggestion="```suggestion" in body,
                         )
                     )
 
@@ -196,3 +210,56 @@ class PRExtractor:
         for comments_list in results:
             all_comments.extend(comments_list)
         return all_comments
+
+    async def fetch_reviews(self, pr: PullRequest) -> list[Review]:
+        reviews: list[Review] = []
+        try:
+            raw_reviews = await self.client.get_all_pages(
+                f"/repos/{self.owner}/{self.repo}/pulls/{pr.number}/reviews",
+                max_pages=3,
+            )
+            for r in raw_reviews:
+                state_str = (r.get("state") or "").upper()
+                try:
+                    state = ReviewState(state_str)
+                except ValueError:
+                    continue
+
+                user_info = r.get("user") or {}
+                author = user_info.get("login", "ghost")
+                is_bot = user_info.get("type") == "Bot" or author.lower().endswith("[bot]")
+                if is_bot:
+                    continue
+
+                reviews.append(
+                    Review(
+                        id=r["id"],
+                        pr_number=pr.number,
+                        author=author,
+                        state=state,
+                        submitted_at=_parse_dt(r.get("submitted_at")),
+                    )
+                )
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code in (401, 403, 429):
+                raise
+            logger.warning("Erro HTTP ao buscar reviews do PR#%s: %s", pr.number, exc)
+        except Exception as exc:
+            logger.warning("Erro ao buscar reviews do PR#%s: %s", pr.number, exc)
+
+        return reviews
+
+    async def fetch_all_reviews(self, prs: list[PullRequest]) -> list[Review]:
+        sem = asyncio.Semaphore(5)
+
+        async def _fetch_with_sem(pr: PullRequest):
+            async with sem:
+                return await self.fetch_reviews(pr)
+
+        tasks = [_fetch_with_sem(pr) for pr in prs]
+        results = await asyncio.gather(*tasks)
+
+        all_reviews = []
+        for review_list in results:
+            all_reviews.extend(review_list)
+        return all_reviews
